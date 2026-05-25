@@ -30,8 +30,8 @@ The tool integrates capital expenditure (CAPEX), operating expenditure (OPEX), a
 **1. Clone the repository**
 
 ```bash
-git clone https://github.com/yourusername/lcoh-aemwe-calculator.git
-cd lcoh-aemwe-calculator
+git clone https://github.com/anantafareza/LCOH-Calculator-for-AEMWE.git
+cd LCOH-Calculator-for-AEMWE
 ```
 
 **2. (Recommended) Create a virtual environment**
@@ -74,7 +74,7 @@ python LCOH_AEMWE.py
 ## File structure
 
 ```
-lcoh-aemwe-calculator/
+LCOH-Calculator-for-AEMWE/
 ├── LCOH_AEMWE.py        # Main application
 ├── requirements.txt     # Python dependencies
 └── README.md            # This file
