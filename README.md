@@ -90,4 +90,4 @@ MIT Licence. See [LICENSE](LICENSE) for details.
 
 ## Contact
 
-Ananta Fareza
+fareza.ananta@gmail.com
