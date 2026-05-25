@@ -75,9 +75,9 @@ python LCOH_AEMWE.py
 
 ```
 LCOH-Calculator-for-AEMWE/
-├── LCOH_AEMWE.py        # Main application
-├── requirements.txt     # Python dependencies
-└── README.md            # This file
+├── LCOH_AEMWE.py        
+├── requirements.txt    
+└── README.md            
 ```
 
 ---
