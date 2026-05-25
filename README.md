@@ -62,12 +62,12 @@ python LCOH_AEMWE.py
 
 ## Usage
 
-1. **Inputs tab** — set plant design targets, financial parameters, and the polarisation curve
-2. **BOM / MEA Materials tab** — select materials and costs for each MEA component
-3. **Anode / Cathode Catalyst Synthesis Cost tabs** — unlock by setting Anode or Cathode Catalyst to "Custom" in BOM
-4. **LCOH Results tab** — click **Calculate LCOH** to run the model and view results
-5. **LCE Analysis tab** — click **Link from LCOH Results**, set grey H₂ reference values, and visualise break-even carbon pricing
-6. **Sensitivity Analysis tab** — click **Set Base Case**, adjust sliders, and run Monte Carlo uncertainty analysis
+1. **Inputs**, set plant design targets, financial parameters, and the polarisation curve
+2. **BOM / MEA Materials**, select materials and costs for each MEA component
+3. **Anode / Cathode Catalyst Synthesis Cost**, unlock by setting Anode or Cathode Catalyst to "Custom" in BOM
+4. **LCOH Results**, click **Calculate LCOH** to run the model and view results
+5. **LCE Analysis**, click **Link from LCOH Results**, set grey H₂ reference values, and visualise break-even carbon pricing
+6. **Sensitivity Analysis**, click **Set Base Case**, adjust sliders, and run Monte Carlo uncertainty analysis
 
 ---
 
