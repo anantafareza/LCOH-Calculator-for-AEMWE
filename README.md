@@ -86,8 +86,3 @@ LCOH-Calculator-for-AEMWE/
 
 MIT Licence. See [LICENSE](LICENSE) for details.
 
----
-
-## Contact
-
-fareza.ananta@gmail.com
