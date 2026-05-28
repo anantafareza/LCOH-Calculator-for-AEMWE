@@ -14,7 +14,7 @@ The tool integrates capital expenditure (CAPEX), operating expenditure (OPEX), a
 - LCE (Life Cycle Emissions) analysis with break-even carbon cost visualisation
 - Sensitivity analysis with ±20% parameter sliders
 - Monte Carlo uncertainty analysis (Normal, Log-normal, Gamma distributions)
-- Export results to CSV, TXT, JSON, or Excel
+- Export results to CSV, TXT, JSON, or XLSX
 
 ---
 
