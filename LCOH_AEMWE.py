@@ -166,7 +166,7 @@ INPUTS_DEF = {
     "faraday_constant":96485.0, "stack_non_mea_per_kw":80.0, "bop_per_kw":300.0,
     "stack_replacement_pct":40.0, "j_ref":1.0, "stack_lifetime_jref_h":20000.0,
     "degradation_exp":1.5, "elec_price_kwh":0.034, "water_price_l":0.001,
-    "water_l_per_kg_h2":10.0, "maintenance_pct_capex":2.0, "labour_yr":50000.0,
+    "water_l_per_kg_h2":20.0, "maintenance_pct_capex":2.0, "labour_yr":50000.0,
 }
 
 BOM_OPTS = {
