@@ -162,11 +162,38 @@ POL_CURVE = [
 INPUTS_DEF = {
     "h2_target_kg_day":1000.0, "electrode_area_cm2":700.0, "operating_days_year":350.0,
     "faradaic_efficiency_pct":100.0, "plant_lifetime_years":30.0, "discount_rate_pct":8.0,
+    "operating_temp_c":60.0,
     "hhv_kwh_per_kg":39.4, "molar_mass_h2":2.016, "electrons_per_h2":2.0,
     "faraday_constant":96485.0, "stack_non_mea_per_kw":80.0, "bop_per_kw":300.0,
     "stack_replacement_pct":40.0, "j_ref":1.0, "stack_lifetime_jref_h":20000.0,
     "degradation_exp":1.5, "elec_price_kwh":0.034, "water_price_l":0.001,
-    "water_l_per_kg_h2":20.0, "maintenance_pct_capex":2.0, "labour_yr":50000.0,
+    "water_l_per_kg_h2":10.0, "maintenance_pct_capex":2.0, "labour_yr":50000.0,
+}
+
+# Human-readable labels for every INPUTS_DEF key — used in Excel export and Guide
+PARAM_LABELS = {
+    "h2_target_kg_day":        ("H2 production target",          "kg/day"),
+    "electrode_area_cm2":      ("Electrode area per cell",        "cm2"),
+    "operating_days_year":     ("Operating days per year",        "days/yr"),
+    "faradaic_efficiency_pct": ("Faradaic efficiency",            "%"),
+    "plant_lifetime_years":    ("Plant lifetime",                 "years"),
+    "discount_rate_pct":       ("Discount rate / WACC",          "%"),
+    "operating_temp_c":        ("Operating temperature",          "°C"),
+    "hhv_kwh_per_kg":          ("HHV of H2",                     "kWh/kg"),
+    "molar_mass_h2":           ("Molar mass H2",                  "g/mol"),
+    "electrons_per_h2":        ("Electrons per H2 molecule",      "—"),
+    "faraday_constant":        ("Faraday constant",               "C/mol"),
+    "stack_non_mea_per_kw":    ("Stack non-MEA cost",             "$/kW_stack"),
+    "bop_per_kw":              ("Balance of plant cost",          "$/kW_el"),
+    "stack_replacement_pct":   ("Stack replacement cost",         "% initial stack CAPEX"),
+    "j_ref":                   ("Reference current density j_ref","A/cm2"),
+    "stack_lifetime_jref_h":   ("Stack lifetime at j_ref",        "hours"),
+    "degradation_exp":         ("Degradation exponent",           "—"),
+    "elec_price_kwh":          ("Electricity price",              "$/kWh"),
+    "water_price_l":           ("Water price",                    "$/L"),
+    "water_l_per_kg_h2":       ("Specific water consumption",     "L/kg H2"),
+    "maintenance_pct_capex":   ("Maintenance",                    "% CAPEX/yr"),
+    "labour_yr":               ("Fixed labour cost",              "$/year"),
 }
 
 BOM_OPTS = {
@@ -240,6 +267,10 @@ class AppState:
     def __init__(self):
         self.inputs = copy.deepcopy(INPUTS_DEF)
         self.pol = copy.deepcopy(POL_CURVE)
+        # Named polarisation curves — list of {"name": str, "data": [(j,V),...]}
+        # The active curve (self.pol) always mirrors curves[active_curve_idx]["data"]
+        self.pol_curves = [{"name": "Default (built-in)", "data": copy.deepcopy(POL_CURVE)}]
+        self.active_curve_idx = 0
         # (#2 #3) Separate anode/cathode catalyst state
         self.anode_cat_params    = copy.deepcopy(CAT_PARAMS_DEF)
         self.anode_cat_reagents  = []
@@ -250,6 +281,8 @@ class AppState:
             mat = d["default"]
             self.bom[comp] = {"material":mat, "quantity":d["quantity"], "unit":d["unit"],
                               "ref_cost":d["options"][mat], "override":None}
+        # Saved scenarios for sensitivity comparison
+        self.scenarios = []  # list of {"name": str, "results": [...calc_all output...]}
 
     def eff_cost(self, comp):
         b = self.bom[comp]
@@ -270,6 +303,51 @@ class AppState:
             elif fw > 0 and y > 0: raw += (r["stoich"] * r["mw"] / (fw * y)) * r["price"]
         return raw * (1 + oh) / 1000.0
 
+    def to_dict(self):
+        """Serialise full app state to a JSON-safe dict."""
+        return {
+            "version": 2,
+            "inputs": copy.deepcopy(self.inputs),
+            "pol_curves": copy.deepcopy(self.pol_curves),
+            "active_curve_idx": self.active_curve_idx,
+            "anode_cat_params": copy.deepcopy(self.anode_cat_params),
+            "anode_cat_reagents": copy.deepcopy(self.anode_cat_reagents),
+            "cathode_cat_params": copy.deepcopy(self.cathode_cat_params),
+            "cathode_cat_reagents": copy.deepcopy(self.cathode_cat_reagents),
+            "bom": copy.deepcopy(self.bom),
+        }
+
+    def from_dict(self, d):
+        """Restore state from a dict (loaded from JSON). Returns list of warnings."""
+        warnings = []
+        self.inputs = {**copy.deepcopy(INPUTS_DEF), **d.get("inputs", {})}
+        curves = d.get("pol_curves")
+        if curves:
+            self.pol_curves = curves
+        else:
+            # legacy v1 file — only had a single pol list
+            pol = d.get("pol")
+            if pol:
+                self.pol_curves = [{"name": "Loaded curve", "data": pol}]
+            warnings.append("Polarisation curve data migrated from legacy format.")
+        self.active_curve_idx = min(d.get("active_curve_idx", 0), len(self.pol_curves) - 1)
+        self.pol = [tuple(p) for p in self.pol_curves[self.active_curve_idx]["data"]]
+        self.anode_cat_params    = d.get("anode_cat_params",    copy.deepcopy(CAT_PARAMS_DEF))
+        self.anode_cat_reagents  = d.get("anode_cat_reagents",  [])
+        self.cathode_cat_params  = d.get("cathode_cat_params",  copy.deepcopy(CAT_PARAMS_DEF))
+        self.cathode_cat_reagents= d.get("cathode_cat_reagents",[])
+        saved_bom = d.get("bom", {})
+        for comp, d2 in BOM_OPTS.items():
+            if comp in saved_bom:
+                self.bom[comp] = saved_bom[comp]
+            else:
+                mat = d2["default"]
+                self.bom[comp] = {"material":mat,"quantity":d2["quantity"],"unit":d2["unit"],
+                                  "ref_cost":d2["options"][mat],"override":None}
+                warnings.append(f"BOM component '{comp}' not found in file — reset to default.")
+        self.scenarios = []
+        return warnings
+
 
 # ── CALCULATOR ────────────────────────────────────────────────────────────────
 
@@ -282,6 +360,17 @@ class Calculator:
     def crf(self):
         r = self.i["discount_rate_pct"] / 100.0; n = self.i["plant_lifetime_years"]
         return (r * (1+r)**n / ((1+r)**n - 1)) if r > 0 else 1.0/n
+
+    @staticmethod
+    def thermoneutral_voltage(T_c):
+        """
+        Temperature-corrected thermoneutral voltage [V].
+        Linear approximation valid 20-90 °C:
+          V_tn(T) = (285830 - 48.5*(T-25)) / (2*96485)
+        At 25 °C → 1.4813 V (consistent with HHV = 285.83 kJ/mol).
+        """
+        dH = 285830.0 - 48.5 * (T_c - 25.0)   # J/mol, linear fit to NIST data
+        return dH / (2.0 * 96485.0)
 
     def calc(self, j):
         i = self.i
@@ -301,11 +390,15 @@ class Calculator:
         maint=(i["maintenance_pct_capex"]/100.0)*capex; labour=i["labour_yr"]
         opex=elec+water+maint+labour
         lcoh=(ann_capex+stack_rep+opex)/h2_yr
-        eff=(i["hhv_kwh_per_kg"]/(V*ne*F/(M/1000.0)/3600.0))*100.0
+        # Temperature-corrected efficiency: η = V_tn(T) / V_cell
+        T_c = i.get("operating_temp_c", 25.0)
+        V_tn = Calculator.thermoneutral_voltage(T_c)
+        eff = (V_tn / V) * 100.0
         return dict(j=j,V=V,eff=eff,N=N,P_kw=P_kw,mea_cost=mea_c,non_mea=non_mea,bop=bop,
                     capex=capex,ann_capex=ann_capex,stack_rep=stack_rep,elec=elec,water=water,
                     maint=maint,labour=labour,opex=opex,h2_yr=h2_yr,lcoh=lcoh,
-                    capex_contrib=(ann_capex+stack_rep)/h2_yr, opex_contrib=opex/h2_yr)
+                    capex_contrib=(ann_capex+stack_rep)/h2_yr, opex_contrib=opex/h2_yr,
+                    V_tn=V_tn)
 
     def calc_all(self): return [self.calc(j) for j in self.pol_j]
 
@@ -346,7 +439,14 @@ def chart_header(parent, title, fig, fname):
 
 class InputsTab(QWidget):
     def __init__(self, state):
-        super().__init__(); self.state=state; self.widgets={}; self._build()
+        super().__init__(); self.state=state; self.widgets={}
+        self._dirty_cb = None
+        self._build()
+
+    def set_dirty_callback(self, cb): self._dirty_cb = cb
+
+    def _mark_dirty(self):
+        if self._dirty_cb: self._dirty_cb()
 
     def _build(self):
         outer=QVBoxLayout(self); outer.setContentsMargins(0,0,0,0)
@@ -369,10 +469,14 @@ class InputsTab(QWidget):
         lay.addWidget(gb)
 
         gc,fc=grp("C.  Electrochemical Constants")
+        self._sp(fc,"Operating temperature [°C]","operating_temp_c",20,90,1)
         self._sp(fc,"HHV of H2 [kWh/kg]","hhv_kwh_per_kg",30,50,2)
         self._sp(fc,"Molar mass H2 [g/mol]","molar_mass_h2",1,10,4)
         self._sp(fc,"Electrons per H2 molecule [n]","electrons_per_h2",1,4,0)
         self._sp(fc,"Faraday constant [C/mol]","faraday_constant",90000,100000,0)
+        self.vtn_lbl=QLabel(); fc.addRow("Thermoneutral voltage V_tn [V]:",self.vtn_lbl)
+        self.widgets["operating_temp_c"].valueChanged.connect(self._refresh_vtn)
+        self._refresh_vtn()
         lay.addWidget(gc)
 
         gd,fd=grp("D.  Capital Expenditure")
@@ -392,7 +496,7 @@ class InputsTab(QWidget):
         self._sp(fe,"Fixed labour cost [$/year]","labour_yr",0,5e6,0)
         lay.addWidget(ge)
 
-        # (#8) renamed from "AEM Cell Polarisation Curve"
+        # ── Polarisation curve ─────────────────────────────────────────────
         gf=make_group("F.  AEMWE System Polarisation Curve")
         lf=QVBoxLayout(gf); lf.setSpacing(6)
         lf.addWidget(QLabel("Pairs must be sorted by current density. Voltage is linearly interpolated."))
@@ -403,7 +507,8 @@ class InputsTab(QWidget):
         pb=QHBoxLayout()
         for txt,fn in [("+ Add Row",self._add_pol_row),("- Remove Selected",self._del_pol_row)]:
             b=QPushButton(txt); b.setStyleSheet(BTN_PRIMARY); b.clicked.connect(fn); pb.addWidget(b)
-        pb.addStretch(); lf.addLayout(pb); lay.addWidget(gf)
+        pb.addStretch(); lf.addLayout(pb)
+        lay.addWidget(gf)
 
         lay.addStretch()
         br=QHBoxLayout(); ab=QPushButton("Apply Changes"); ab.setStyleSheet(BTN_PRIMARY)
@@ -412,7 +517,9 @@ class InputsTab(QWidget):
 
     def _sp(self,form,label,key,mn,mx,dec):
         s=dspin(self.state.inputs[key],mn,mx,dec)
-        s.valueChanged.connect(self._refresh_crf); self.widgets[key]=s; form.addRow(f"{label}:",s)
+        s.valueChanged.connect(self._refresh_crf)
+        s.valueChanged.connect(self._mark_dirty)
+        self.widgets[key]=s; form.addRow(f"{label}:",s)
 
     def _refresh_crf(self):
         rw=self.widgets.get("discount_rate_pct"); nw=self.widgets.get("plant_lifetime_years")
@@ -420,6 +527,11 @@ class InputsTab(QWidget):
             r=rw.value()/100.0; n=nw.value()
             crf=(r*(1+r)**n/((1+r)**n-1)) if r>0 else 1/n
             self.crf_lbl.setText(f"{crf:.8f}")
+
+    def _refresh_vtn(self):
+        T=self.widgets["operating_temp_c"].value()
+        vtn=Calculator.thermoneutral_voltage(T)
+        self.vtn_lbl.setText(f"{vtn:.5f} V")
 
     def _load_pol(self):
         self.pol_tbl.setRowCount(len(self.state.pol))
@@ -443,8 +555,22 @@ class InputsTab(QWidget):
             except Exception: pass
         pol.sort(key=lambda x:x[0])
         if len(pol)<2: QMessageBox.warning(self,"Too few points","Need at least 2 points."); return
+        vs=[p[1] for p in pol]
+        if any(vs[i]>=vs[i+1] for i in range(len(vs)-1)):
+            QMessageBox.warning(self,"Non-monotonic voltage",
+                "Cell voltage must increase with current density. Check your j-V data.")
+            return
         self.state.pol=pol
+        # Keep state.pol_curves[0] in sync (single curve)
+        self.state.pol_curves[0]["data"]=pol
+        if self._dirty_cb: self._dirty_cb(clean=True)
         QMessageBox.information(self,"Applied","Inputs applied. Switch to LCOH Results to recalculate.")
+
+    def load_state(self):
+        """Repopulate all widgets from state after project load."""
+        for key,w in self.widgets.items():
+            w.blockSignals(True); w.setValue(self.state.inputs.get(key, INPUTS_DEF.get(key,0))); w.blockSignals(False)
+        self._refresh_crf(); self._refresh_vtn(); self._load_pol()
 
 
 # ── TAB 2: BOM / MEA MATERIALS ────────────────────────────────────────────────
@@ -454,7 +580,12 @@ class BOMTab(QWidget):
         super().__init__(); self.state=state
         self._combos={}; self._qty={}; self._ov_chk={}; self._ov_spin={}
         self._ref_lbl={}; self._eff_lbl={}
+        self._dirty_cb=None
         self._build()
+
+    def set_dirty_callback(self, cb): self._dirty_cb=cb
+    def _mark_dirty(self):
+        if self._dirty_cb: self._dirty_cb()
 
     def _build(self):
         lay=QVBoxLayout(self); lay.setContentsMargins(16,16,16,16); lay.setSpacing(10)
@@ -490,9 +621,13 @@ class BOMTab(QWidget):
             self._ov_chk[comp]=ov_chk; self._ov_spin[comp]=ov_spin; self.tbl.setCellWidget(row,5,ov_w)
             el=QLabel(); self._eff_lbl[comp]=el; self.tbl.setCellWidget(row,6,el)
             cb.currentTextChanged.connect(lambda _,c=comp: self._mat_changed(c))
+            cb.currentTextChanged.connect(lambda _: self._mark_dirty())
             qs.valueChanged.connect(lambda _,c=comp: self._recompute(c))
+            qs.valueChanged.connect(lambda _: self._mark_dirty())
             ov_chk.stateChanged.connect(lambda _,c=comp: self._ov_toggled(c))
+            ov_chk.stateChanged.connect(lambda _: self._mark_dirty())
             ov_spin.valueChanged.connect(lambda _,c=comp: self._recompute(c))
+            ov_spin.valueChanged.connect(lambda _: self._mark_dirty())
             self._recompute(comp)
 
         lay.addWidget(self.tbl)
@@ -536,7 +671,30 @@ class BOMTab(QWidget):
             b["quantity"]=self._qty[comp].value()
             b["ref_cost"]=BOM_OPTS[comp]["options"].get(b["material"],0.0)
             b["override"]=(self._ov_spin[comp].value() if self._ov_chk[comp].isChecked() else None)
+        if self._dirty_cb: self._dirty_cb(clean=True)
         QMessageBox.information(self,"Applied","BOM applied. Switch to LCOH Results to recalculate.")
+
+    def load_state(self):
+        """Repopulate BOM widgets from state after project load."""
+        for comp in BOM_OPTS:
+            b=self.state.bom[comp]
+            self._combos[comp].blockSignals(True)
+            self._combos[comp].setCurrentText(b["material"])
+            self._combos[comp].blockSignals(False)
+            self._qty[comp].blockSignals(True)
+            self._qty[comp].setValue(b["quantity"])
+            self._qty[comp].blockSignals(False)
+            ref=b["ref_cost"]; self._ref_lbl[comp].setText(f"  {ref:.5f}")
+            has_ov=b["override"] is not None
+            self._ov_chk[comp].blockSignals(True)
+            self._ov_chk[comp].setChecked(has_ov)
+            self._ov_chk[comp].blockSignals(False)
+            self._ov_spin[comp].blockSignals(True)
+            self._ov_spin[comp].setValue(b["override"] if has_ov else ref)
+            self._ov_spin[comp].setEnabled(has_ov)
+            self._ov_spin[comp].blockSignals(False)
+            self._recompute(comp)
+        self._refresh_total()
 
 
 # ── TABS 3 & 4: CATALYST SYNTHESIS (generic — anode or cathode) ──────────────
@@ -660,6 +818,28 @@ class CatalystSynthesisTab(QWidget):
         self.oh_lbl.setText(f"${oh:.5f} / g  [{self.oh_sp.value():.0f}% of reagents]")
         self.tot_g_lbl.setText(f"${total:.5f} / g  |  ${total*1000:.2f} / kg")
         self.tot_mg_lbl.setText(f"${mg:.7f} / mg")
+        # Live push to BOM if Custom is selected — no silent drift
+        self._push_cost_to_bom_live()
+
+    def _push_cost_to_bom_live(self):
+        """Push computed catalyst cost into BOM immediately if material is Custom."""
+        p=self._p(); regs=self._r()
+        # Build reagent list from current table without touching state
+        fw=self.fw_sp.value(); y=self.yield_sp.value()/100.0; oh=self.oh_sp.value()/100.0
+        if fw==0 or y==0: return
+        raw=0.0
+        for r in range(self.rgt_tbl.rowCount()):
+            def cell(c,rr=r): return self.rgt_tbl.item(rr,c)
+            try:
+                s=float(cell(1).text()); m=float(cell(2).text())
+                v=float(cell(3).text()); pr=float(cell(4).text())
+                is_sol=(s==0.0 and m==0.0)
+                raw+= v*pr if is_sol else ((s*m/(fw*y))*pr if fw>0 and y>0 else 0.0)
+            except Exception: pass
+        mg_cost=raw*(1+oh)/1000.0
+        comp=self._bom_comp()
+        if self.state.bom[comp]["material"]=="Custom":
+            self.state.bom[comp]["ref_cost"]=mg_cost
 
     def apply_and_push(self):
         p=self._p()
@@ -677,13 +857,16 @@ class CatalystSynthesisTab(QWidget):
             except Exception: pass
         self._set_r(regs)
         mg_cost=self.state.calc_cat_cost(self._side_key())
-        mat=self.state.bom[self._bom_comp()]["material"]
-        if mat == "Custom":
-            self.state.bom[self._bom_comp()]["ref_cost"]=mg_cost
+        comp=self._bom_comp()
+        mat=self.state.bom[comp]["material"]
+        if mat=="Custom":
+            self.state.bom[comp]["ref_cost"]=mg_cost
+            msg="Cost pushed to BOM (Custom selected)."
+        else:
+            msg=f"Set '{comp}' to 'Custom' in BOM / MEA Materials to link this cost."
         self._recalc()
         QMessageBox.information(self,"Applied",
-            f"{self.side} catalyst cost: ${mg_cost:.7f}/mg\n\n"
-            f"{'Cost pushed to BOM.' if 'In-house' in mat else 'Switch Anode/Cathode Catalyst to Custom in BOM to link this cost.'}\n\n"
+            f"{self.side} catalyst synthesis cost: ${mg_cost:.7f}/mg\n\n{msg}\n\n"
             "Switch to LCOH Results to recalculate.")
 
 
@@ -897,10 +1080,40 @@ class ResultsTab(QWidget):
         with open(path,"w") as f: json.dump(data,f,indent=2)
         QMessageBox.information(self,"Exported",f"Saved: {path}")
     def _export_xlsx(self,path):
-        wb=openpyxl.Workbook(); ws=wb.active; ws.title="LCOH Results"
-        ws2=wb.create_sheet("Inputs Used"); ws2.append(["Parameter","Value"])
-        for k,v in self.state.inputs.items(): ws2.append([k,v])
-        ws.append(self._hdrs()); [ws.append(self._vals(r)) for r in self.results]
+        wb=openpyxl.Workbook()
+
+        # Sheet 1: LCOH Results
+        ws=wb.active; ws.title="LCOH Results"
+        ws.append(self._hdrs())
+        for r in self.results: ws.append(self._vals(r))
+
+        # Sheet 2: Inputs (human-readable labels + units)
+        ws2=wb.create_sheet("Inputs")
+        ws2.append(["Parameter","Value","Unit"])
+        for k,v in self.state.inputs.items():
+            label,unit=PARAM_LABELS.get(k,(k,""))
+            ws2.append([label, v, unit])
+
+        # Sheet 3: BOM
+        ws3=wb.create_sheet("BOM / MEA Materials")
+        ws3.append(["Component","Material","Quantity","Unit","Ref Cost [$/unit]","Override Cost","Effective Cost [$/cm2]"])
+        for comp in BOM_OPTS:
+            b=self.state.bom[comp]
+            ov=b["override"] if b["override"] is not None else ""
+            eff=b["quantity"]*(b["override"] if b["override"] is not None else b["ref_cost"])
+            ws3.append([comp, b["material"], b["quantity"], b["unit"], b["ref_cost"], ov, eff])
+
+        # Sheet 4: Polarisation Curve(s)
+        ws4=wb.create_sheet("Polarisation Curves")
+        col=1
+        for curve in self.state.pol_curves:
+            ws4.cell(row=1,column=col,value=curve["name"]+" — j [A/cm2]")
+            ws4.cell(row=1,column=col+1,value=curve["name"]+" — V [V]")
+            for row_i,(j,v) in enumerate(curve["data"],start=2):
+                ws4.cell(row=row_i,column=col,value=j)
+                ws4.cell(row=row_i,column=col+1,value=v)
+            col+=3
+
         wb.save(path); QMessageBox.information(self,"Exported",f"Saved: {path}")
 
 
@@ -936,6 +1149,22 @@ class SensitivityTab(QWidget):
         base_btn.clicked.connect(self._set_base); ll.addWidget(base_btn)
         self.opt_lbl=QLabel("Base case LCOH: —")
         self.opt_lbl.setStyleSheet("font-weight:bold;color:#B03030;font-size:11px;"); ll.addWidget(self.opt_lbl)
+
+        # ── Scenario manager ─────────────────────────────────────────────
+        grp_sc=make_group("Scenarios"); gs_lay=QVBoxLayout(grp_sc); gs_lay.setSpacing(4)
+        sc_btn_row=QHBoxLayout()
+        save_sc_btn=QPushButton("Save current as scenario"); save_sc_btn.setStyleSheet(BTN_SMALL)
+        save_sc_btn.clicked.connect(self._save_scenario)
+        del_sc_btn=QPushButton("Remove selected"); del_sc_btn.setStyleSheet(BTN_SMALL)
+        del_sc_btn.clicked.connect(self._del_scenario)
+        sc_btn_row.addWidget(save_sc_btn); sc_btn_row.addWidget(del_sc_btn); sc_btn_row.addStretch()
+        gs_lay.addLayout(sc_btn_row)
+        self.sc_list=QTableWidget(0,2); self.sc_list.setHorizontalHeaderLabels(["Scenario","Min LCOH [$/kg]"])
+        self.sc_list.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
+        self.sc_list.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeToContents)
+        self.sc_list.setFixedHeight(110); self.sc_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.sc_list.setSelectionBehavior(QAbstractItemView.SelectRows)
+        gs_lay.addWidget(self.sc_list); ll.addWidget(grp_sc)
 
         # ── Sensitivity sliders ──────────────────────────────────────────
         grp_sens=make_group("Sensitivity Sliders  (±20% from base)"); gs=QVBoxLayout(grp_sens); gs.setSpacing(4)
@@ -1041,6 +1270,40 @@ class SensitivityTab(QWidget):
             base_lbl.setText(f"(base: {cur:.{dec}f})")
         self._do_update()
 
+    def _save_scenario(self):
+        if not self.base_results:
+            QMessageBox.warning(self,"No base case","Set base case first."); return
+        try:
+            mea=self.state.mea_per_cm2()
+            results=Calculator(self._modified_inputs(),mea,self.state.pol).calc_all()
+        except Exception as ex: QMessageBox.critical(self,"Error",str(ex)); return
+        name,ok=self._ask_scenario_name()
+        if not ok: return
+        self.state.scenarios.append({"name":name,"results":results})
+        best=min(results,key=lambda r:r["lcoh"])
+        row=self.sc_list.rowCount(); self.sc_list.insertRow(row)
+        self.sc_list.setItem(row,0,QTableWidgetItem(name))
+        self.sc_list.setItem(row,1,QTableWidgetItem(f"{best['lcoh']:.4f}"))
+        self._do_update()
+
+    def _del_scenario(self):
+        row=self.sc_list.currentRow()
+        if row<0: return
+        self.sc_list.removeRow(row)
+        self.state.scenarios.pop(row)
+        self._do_update()
+
+    def _ask_scenario_name(self, default=None):
+        if default is None:
+            default=f"Scenario {len(self.state.scenarios)+1}"
+        result=QMessageBox(self); result.setWindowTitle("Scenario name")
+        result.setText("Enter a name for this scenario:")
+        le=QLineEdit(default); result.layout().addWidget(le,1,0,1,3)
+        result.setStandardButtons(QMessageBox.Ok|QMessageBox.Cancel)
+        if result.exec()==QMessageBox.Ok:
+            return (le.text().strip() or default), True
+        return default, False
+
     def _modified_inputs(self):
         inp=copy.deepcopy(self.state.inputs)
         for key,(slider,mn,step,dec,*_) in self._sliders.items(): inp[key]=mn+slider.value()*step
@@ -1055,17 +1318,44 @@ class SensitivityTab(QWidget):
         try: mea=self.state.mea_per_cm2(); mod_res=Calculator(self._modified_inputs(),mea,self.state.pol).calc_all()
         except Exception: self.canvas_top.draw(); return
         js=[r["j"] for r in mod_res]; data_lines=[]
+        SC_COLORS=["#1B9E77","#D95F02","#7570B3","#E7298A","#66A61E","#E6AB02","#A6761D"]
+
+        # Collect all LCOH values across every visible series to set y-axis correctly
+        all_lcohs=[]
+
+        # Saved scenarios (behind everything else)
+        for i,sc in enumerate(self.state.scenarios):
+            sc_js=[r["j"] for r in sc["results"]]
+            sc_ls=[r["lcoh"] for r in sc["results"]]
+            sl,=self.ax_top.plot(sc_js,sc_ls,
+                color=SC_COLORS[i%len(SC_COLORS)],linewidth=1.6,linestyle=":",
+                label=sc["name"],zorder=2)
+            data_lines.append(sl); all_lcohs.extend(sc_ls)
+
         if self.base_results:
-            bl,=self.ax_top.plot(js,[r["lcoh"] for r in self.base_results],color="#9E9E9E",linewidth=1.5,linestyle="--",alpha=0.8,label="Base case")
-            data_lines.append(bl)
-        ml,=self.ax_top.plot(js,[r["lcoh"] for r in mod_res],color=BLUE_HEX,linewidth=2.0,label="Modified")
-        data_lines.append(ml)
+            bl_ls=[r["lcoh"] for r in self.base_results]
+            bl,=self.ax_top.plot(js,bl_ls,color="#9E9E9E",linewidth=1.5,
+                linestyle="--",alpha=0.85,label="Base case",zorder=3)
+            data_lines.append(bl); all_lcohs.extend(bl_ls)
+
+        ml_ls=[r["lcoh"] for r in mod_res]
+        ml,=self.ax_top.plot(js,ml_ls,color=BLUE_HEX,linewidth=2.0,label="Modified",zorder=4)
+        data_lines.append(ml); all_lcohs.extend(ml_ls)
+
         if mod_res:
             best=min(mod_res,key=lambda r:r["lcoh"])
             self.ax_top.axvline(best["j"],color=RED_HEX,linestyle="--",linewidth=1.0,alpha=0.7)
             self.ax_top.set_title(f"Modified  -->  Min LCOH: {best['lcoh']:.3f} $/kg  @  j = {best['j']:.2f} A/cm2",fontsize=9)
-        self.ax_top.set_xlabel("Current Density [A/cm2]",fontsize=9); self.ax_top.set_ylabel("LCOH [$/kg H2]",fontsize=9)
-        self.ax_top.legend(fontsize=8); self.ax_top.grid(True,alpha=0.25)
+
+        # Y-axis: fit all series with a small margin
+        if all_lcohs:
+            y_lo=min(all_lcohs); y_hi=max(all_lcohs)
+            margin=(y_hi-y_lo)*0.08 if y_hi>y_lo else 0.5
+            self.ax_top.set_ylim(max(0,y_lo-margin), y_hi+margin)
+
+        self.ax_top.set_xlabel("Current Density [A/cm2]",fontsize=9)
+        self.ax_top.set_ylabel("LCOH [$/kg H2]",fontsize=9)
+        self.ax_top.legend(fontsize=7,loc="upper right"); self.ax_top.grid(True,alpha=0.25)
         if data_lines:
             self._sens_cur=mplcursors.cursor(data_lines,hover=True)
             @self._sens_cur.connect("add")
@@ -1492,17 +1782,115 @@ class LCETab(QWidget):
 # ── GUIDE TAB ────────────────────────────────────────────────────────────────
 
 class GuideTab(QWidget):
-    def __init__(self):
-        super().__init__(); self._build()
+    def __init__(self, state):
+        super().__init__(); self.state=state; self._build()
 
     def _build(self):
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
-        browser = QTextBrowser(); browser.setOpenExternalLinks(False)
-        browser.setStyleSheet("QTextBrowser { background-color: #F8F7F2; border: none; padding: 4px; color: #1A1A18; }")
-        browser.setHtml(GUIDE_HTML); lay.addWidget(browser)
+        self.browser = QTextBrowser(); self.browser.setOpenExternalLinks(False)
+        self.browser.setStyleSheet("QTextBrowser { background-color: #F8F7F2; border: none; padding: 4px; color: #1A1A18; }")
+        self.browser.setHtml(self._build_html()); lay.addWidget(self.browser)
+
+    def _build_html(self):
+        i=self.state.inputs
+        T=i.get("operating_temp_c",60.0)
+        vtn=Calculator.thermoneutral_voltage(T)
+        return _GUIDE_HTML_STATIC + _build_equations_html(i, T, vtn)
 
 
-GUIDE_HTML = """
+def _build_equations_html(i, T_c, V_tn):
+    """Generate the Key Equations section from live Calculator constants."""
+    r=i.get("discount_rate_pct",8.0)/100.0; n=i.get("plant_lifetime_years",30.0)
+    crf=(r*(1+r)**n/((1+r)**n-1)) if r>0 else 1/n
+    return f"""
+<h2 style="color:#2D5A8E; border-bottom:1px solid #C0BFB8; padding-bottom:6px;">Key Equations</h2>
+<p style="font-size:10px;color:#888;">Generated from current inputs. Values shown in parentheses reflect the current parameter set.</p>
+<table style="border-collapse:collapse; width:100%; margin-bottom:12px;">
+  <tr style="vertical-align:top;">
+    <td style="width:32px; padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">1</td>
+    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
+      <b>LCOH</b><br>
+      <span style="font-family:monospace;font-size:12px;color:#1A5C1A;">LCOH = (Annualised CAPEX + Stack Replacement + OPEX) / H2 production [kg/yr]</span><br>
+      <span style="color:#666;font-size:11px;">H2 production = {i.get('h2_target_kg_day',1000):.0f} kg/day × {i.get('operating_days_year',350):.0f} days/yr = {i.get('h2_target_kg_day',1000)*i.get('operating_days_year',350):,.0f} kg/yr</span>
+    </td>
+  </tr>
+  <tr style="vertical-align:top;">
+    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">2</td>
+    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
+      <b>CAPEX</b><br>
+      <span style="font-family:monospace;font-size:12px;color:#1A5C1A;">CAPEX = C_MEA + C_nonMEA + C_BoP</span><br>
+      <span style="color:#666;font-size:11px;">
+        C_nonMEA = {i.get('stack_non_mea_per_kw',80):.2f} $/kW_stack × stack power [kW]<br>
+        C_BoP    = {i.get('bop_per_kw',300):.2f} $/kW_el × stack power [kW]
+      </span>
+    </td>
+  </tr>
+  <tr style="vertical-align:top;">
+    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">3</td>
+    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
+      <b>Capital Recovery Factor (CRF)</b><br>
+      <span style="font-family:monospace;font-size:12px;color:#1A5C1A;">CRF = r×(1+r)^n / ((1+r)^n − 1)</span><br>
+      <span style="color:#666;font-size:11px;">r = {i.get('discount_rate_pct',8):.1f}% | n = {i.get('plant_lifetime_years',30):.0f} years → CRF = <b>{crf:.6f}</b></span>
+    </td>
+  </tr>
+  <tr style="vertical-align:top;">
+    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">4</td>
+    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
+      <b>Stack Replacement Cost (per year)</b><br>
+      <span style="font-family:monospace;font-size:12px;color:#1A5C1A;">Stack Rep. = (op_hours/yr / t_life) × {i.get('stack_replacement_pct',40):.0f}% × (C_MEA + C_nonMEA)</span><br>
+      <span style="color:#666;font-size:11px;">op_hours/yr = {i.get('operating_days_year',350):.0f} days × 24 = {i.get('operating_days_year',350)*24:.0f} h/yr</span>
+    </td>
+  </tr>
+  <tr style="vertical-align:top;">
+    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">5</td>
+    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
+      <b>Stack Lifetime Degradation Model</b><br>
+      <span style="font-family:monospace;font-size:12px;color:#1A5C1A;">t_life(j) = t_life(j_ref) × (j_ref / j)^n_deg</span><br>
+      <span style="color:#666;font-size:11px;">j_ref = {i.get('j_ref',1):.2f} A/cm2 | t_life(j_ref) = {i.get('stack_lifetime_jref_h',20000):.0f} h | n_deg = {i.get('degradation_exp',1.5):.2f}</span>
+    </td>
+  </tr>
+  <tr style="vertical-align:top;">
+    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">6</td>
+    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
+      <b>OPEX</b><br>
+      <span style="font-family:monospace;font-size:12px;color:#1A5C1A;">OPEX = Electricity + Water + Maintenance + Labour</span><br>
+      <span style="color:#666;font-size:11px;">
+        Electricity  = stack power [kW] × {i.get('elec_price_kwh',0.034):.4f} $/kWh × op_hours/yr<br>
+        Water        = H2 production [kg/yr] × {i.get('water_l_per_kg_h2',10):.1f} L/kg × {i.get('water_price_l',0.001):.4f} $/L<br>
+        Maintenance  = {i.get('maintenance_pct_capex',2):.1f}% × CAPEX | Labour = {i.get('labour_yr',50000):,.0f} $/yr
+      </span>
+    </td>
+  </tr>
+  <tr style="vertical-align:top;">
+    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">7</td>
+    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
+      <b>Electrolyser Efficiency</b><br>
+      <span style="font-family:monospace;font-size:12px;color:#1A5C1A;">η = V_tn(T) / V_cell × 100%</span><br>
+      <span style="color:#666;font-size:11px;">
+        V_tn(T) = (285830 − 48.5×(T−25)) / (2×96485)<br>
+        At T = {T_c:.0f} °C → V_tn = <b>{V_tn:.5f} V</b>
+      </span>
+    </td>
+  </tr>
+  <tr style="vertical-align:top;">
+    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">8</td>
+    <td style="padding:7px 0;">
+      <b>LCE-Adjusted LCOH (LCE Analysis)</b><br>
+      <span style="font-family:monospace;font-size:12px;color:#1A5C1A;">
+        LCOH_adj(green) = LCOH_base + LCE_green × CC / 1000<br>
+        LCOH_adj(grey)  = LCOH_grey  + LCE_grey  × CC / 1000
+      </span><br>
+      <span style="color:#666;font-size:11px;">CC = carbon cost [$/tCO2eq] | LCE in kgCO2eq/kg H2<br>
+        CC_breakeven = 1000 × (LCOH_base − LCOH_grey) / (LCE_grey − LCE_green)
+      </span>
+    </td>
+  </tr>
+</table>
+</body></html>
+"""
+
+
+_GUIDE_HTML_STATIC = """
 <html>
 <body style="font-family:'Segoe UI',Arial,sans-serif; font-size:12px;
              color:#1A1A18; background:#F8F7F2; margin:24px; line-height:1.7;">
@@ -1611,99 +1999,24 @@ GUIDE_HTML = """
   </tr>
 </table>
 
-<!-- ── KEY EQUATIONS ───────────────────────────────────────────────────── -->
-<h2 style="color:#2D5A8E; border-bottom:1px solid #C0BFB8; padding-bottom:6px;">
-  Key Equations
-</h2>
-
-<table style="border-collapse:collapse; width:100%; margin-bottom:12px;">
-  <tr style="vertical-align:top;">
-    <td style="width:32px; padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">1</td>
-    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
-      <b style="color:#1A1A18;">LCOH</b><br>
-      <span style="font-family:monospace; font-size:12px; color:#1A5C1A;">LCOH = (Annualised CAPEX + Stack Replacement + OPEX) / H2 production [kg/yr]</span><br>
-      <span style="color:#666666; font-size:11px;">H2 production [kg/yr] = production target [kg/day] x operating days/yr</span>
-    </td>
-  </tr>
-  <tr style="vertical-align:top;">
-    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">2</td>
-    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
-      <b style="color:#1A1A18;">CAPEX</b><br>
-      <span style="font-family:monospace; font-size:12px; color:#1A5C1A;">CAPEX = C_MEA + C_nonMEA + C_BoP</span><br>
-      <span style="color:#666666; font-size:11px;">
-        C_MEA    = MEA cost [$/cm2] x electrode area [cm2] x N_cells<br>
-        C_nonMEA = non-MEA unit cost [$/kW_stack] x stack power [kW]<br>
-        C_BoP    = BoP unit cost [$/kW_el] x stack power [kW]<br>
-        N_cells  = H2 production rate / ( j x A x f_Faradaic / (n_e x F) x M_H2/1000 )<br>
-        Stack power [kW] = N_cells x V_cell x j x A / 1000<br>
-        j = current density [A/cm2] | A = electrode area [cm2] | n_e = electrons per H2 molecule<br>
-        F = Faraday constant [C/mol] | M_H2 = molar mass H2 [g/mol] | V_cell = cell voltage [V]
-      </span>
-    </td>
-  </tr>
-  <tr style="vertical-align:top;">
-    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">3</td>
-    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
-      <b style="color:#1A1A18;">Capital Recovery Factor (CRF)</b><br>
-      <span style="font-family:monospace; font-size:12px; color:#1A5C1A;">CRF = r x (1 + r)^n / ( (1 + r)^n - 1 )</span><br>
-      <span style="color:#666666; font-size:11px;">
-        r = discount rate (fraction) | n = plant lifetime [years]<br>
-        Annualised CAPEX = Total CAPEX x CRF
-      </span>
-    </td>
-  </tr>
-  <tr style="vertical-align:top;">
-    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">4</td>
-    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
-      <b style="color:#1A1A18;">Stack Replacement Cost (per year)</b><br>
-      <span style="font-family:monospace; font-size:12px; color:#1A5C1A;">Stack Rep. = (op_hours/yr / t_life) x replacement_fraction x (C_MEA + C_nonMEA)</span><br>
-      <span style="color:#666666; font-size:11px;">op_hours/yr = operating days/yr x 24</span>
-    </td>
-  </tr>
-  <tr style="vertical-align:top;">
-    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">5</td>
-    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
-      <b style="color:#1A1A18;">Stack Lifetime Degradation Model</b><br>
-      <span style="font-family:monospace; font-size:12px; color:#1A5C1A;">t_life(j) = t_life(j_ref) x (j_ref / j)^n_deg</span><br>
-      <span style="color:#666666; font-size:11px;">j = operating current density | j_ref = reference current density | n_deg = degradation exponent</span>
-    </td>
-  </tr>
-  <tr style="vertical-align:top;">
-    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">6</td>
-    <td style="padding:7px 0; border-bottom:1px solid #C0BFB8;">
-      <b style="color:#1A1A18;">OPEX</b><br>
-      <span style="font-family:monospace; font-size:12px; color:#1A5C1A;">OPEX = Electricity + Water + Maintenance + Labour</span><br>
-      <span style="color:#666666; font-size:11px;">
-        Electricity = stack power [kW] x electricity price [$/kWh] x op_hours/yr<br>
-        Water       = H2 production [kg/yr] x specific consumption [L/kg] x water price [$/L]<br>
-        Maintenance = maintenance rate [%] x Total CAPEX
-      </span>
-    </td>
-  </tr>
-  <tr style="vertical-align:top;">
-    <td style="padding:7px 10px 7px 0; color:#B03030; font-weight:bold; font-size:14px;">7</td>
-    <td style="padding:7px 0;">
-      <b style="color:#1A1A18;">LCE-Adjusted LCOH (LCE Analysis)</b><br>
-      <span style="font-family:monospace; font-size:12px; color:#1A5C1A;">
-        LCOH_adj(green) = LCOH_base + LCE_green x CC / 1000<br>
-        LCOH_adj(grey)  = LCOH_grey  + LCE_grey  x CC / 1000
-      </span><br>
-      <span style="color:#666666; font-size:11px;">
-        LCOH_base = non-electricity LCOH + specific energy x electricity price<br>
-        CC = carbon cost [$/tCO2eq] | LCE in kgCO2eq/kg H2
-      </span><br>
-      <span style="font-family:monospace; font-size:12px; color:#1A5C1A;">CC_breakeven = 1000 x (LCOH_base - LCOH_grey) / (LCE_grey - LCE_green)</span><br>
-      <span style="color:#666666; font-size:11px;">Special case LCE_green = 0: &nbsp; CC_breakeven = 1000 x (LCOH_base - LCOH_grey) / LCE_grey</span>
-    </td>
-  </tr>
-</table>
-
-</body>
-</html>
+<!-- ── KEY EQUATIONS generated programmatically ──────────────────────── -->
 """
 
 
 # ── MAIN WINDOW ───────────────────────────────────────────────────────────────
+
+# Status pill style — matches BTN_PRIMARY font/padding exactly
+_PILL_OK  = ("QPushButton { background:#2E7D32; color:white; border-radius:4px;"
+             " padding:4px 12px; font-size:9px; font-weight:bold; border:none; }"
+             "QPushButton:hover { background:#2E7D32; }")
+_PILL_WARN= ("QPushButton { background:#E65100; color:white; border-radius:4px;"
+             " padding:4px 12px; font-size:9px; font-weight:bold; border:none; }"
+             "QPushButton:hover { background:#E65100; }")
+# Save/Load match pill exactly (same font-size/padding, different hue)
+_BTN_SB   = ("QPushButton { background:#2D5A8E; color:white; border-radius:4px;"
+             " padding:4px 12px; font-size:9px; font-weight:bold; border:none; }"
+             "QPushButton:hover  { background:#3B6BA0; }"
+             "QPushButton:pressed{ background:#1E4070; }")
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1715,12 +2028,12 @@ class MainWindow(QMainWindow):
         except Exception: pass
 
         state=AppState()
-        self.tabs=QTabWidget()   # store as self.tabs for enabling/disabling
+        self.state=state
+        self.tabs=QTabWidget()
 
-        self.guide_tab        = GuideTab()
+        self.guide_tab        = GuideTab(state)
         self.inputs_tab       = InputsTab(state)
         self.bom_tab          = BOMTab(state)
-        # (#3) Two catalyst tabs — one generic class instantiated twice
         self.anode_cat_tab    = CatalystSynthesisTab(state, "Anode")
         self.cathode_cat_tab  = CatalystSynthesisTab(state, "Cathode")
         self.results_tab      = ResultsTab(state)
@@ -1739,21 +2052,113 @@ class MainWindow(QMainWindow):
         self._anode_tab_idx   = self.tabs.indexOf(self.anode_cat_tab)
         self._cathode_tab_idx = self.tabs.indexOf(self.cathode_cat_tab)
 
-        # (#4) Connect BOM combos to tab enabling logic
         self.bom_tab._combos["Anode Catalyst"].currentTextChanged.connect(self._update_synth_tabs)
         self.bom_tab._combos["Cathode Catalyst"].currentTextChanged.connect(self._update_synth_tabs)
-        self._update_synth_tabs()   # set initial state (both disabled — commercial defaults)
+        self._update_synth_tabs()
 
+        # Wire dirty callbacks
+        self.inputs_tab.set_dirty_callback(self._inputs_changed)
+        self.bom_tab.set_dirty_callback(self._bom_changed)
+
+        # Patch calculate to update pills
+        orig_calc=self.results_tab.calculate
+        def _patched_calc():
+            orig_calc()
+            if self.results_tab.results:
+                self._pill_results.setText("LCOH: ready"); self._pill_results.setStyleSheet(_PILL_OK)
+                self._pill_lce.setText("LCE: outdated"); self._pill_lce.setStyleSheet(_PILL_WARN)
+        self.results_tab.calculate=_patched_calc
+
+        orig_link=self.lce_tab._link
+        def _patched_link():
+            orig_link()
+            self._pill_lce.setText("LCE: ready"); self._pill_lce.setStyleSheet(_PILL_OK)
+        self.lce_tab._link=_patched_link
+
+        # Central widget — tabs only
         self.setCentralWidget(self.tabs)
+
+        # ── Status bar ────────────────────────────────────────────────────
+        # Left: regular showMessage tooltip (restored)
+        # Right: pills + Save/Load via addPermanentWidget
         sb=QStatusBar(); self.setStatusBar(sb)
+        sb.setSizeGripEnabled(True)
         sb.showMessage("Ready — apply your inputs, then switch to LCOH Results and click Calculate LCOH.")
 
+        # Pills — non-interactive, right-aligned via addPermanentWidget
+        self._pill_inputs =QPushButton("Inputs: applied")
+        self._pill_bom    =QPushButton("BOM: applied")
+        self._pill_results=QPushButton("LCOH: ready")
+        self._pill_lce    =QPushButton("LCE: ready")
+        for p in [self._pill_inputs,self._pill_bom,self._pill_results,self._pill_lce]:
+            p.setStyleSheet(_PILL_OK); p.setFocusPolicy(Qt.NoFocus)
+
+        sep=QFrame(); sep.setFrameShape(QFrame.VLine); sep.setFrameShadow(QFrame.Sunken)
+
+        save_btn=QPushButton("Save Project"); save_btn.setStyleSheet(_BTN_SB)
+        load_btn=QPushButton("Load Project"); load_btn.setStyleSheet(_BTN_SB)
+        save_btn.clicked.connect(self._save_project)
+        load_btn.clicked.connect(self._load_project)
+
+        # addPermanentWidget puts items on the RIGHT and they don't get covered by showMessage
+        for w in [self._pill_inputs, self._pill_bom, self._pill_results, self._pill_lce,
+                  sep, save_btn, load_btn]:
+            sb.addPermanentWidget(w)
+
+    def _inputs_changed(self, clean=False):
+        if clean:
+            self._pill_inputs.setText("Inputs: applied"); self._pill_inputs.setStyleSheet(_PILL_OK)
+        else:
+            self._pill_inputs.setText("Inputs: modified"); self._pill_inputs.setStyleSheet(_PILL_WARN)
+        self._pill_results.setText("LCOH: outdated"); self._pill_results.setStyleSheet(_PILL_WARN)
+        self._pill_lce.setText("LCE: outdated");      self._pill_lce.setStyleSheet(_PILL_WARN)
+
+    def _bom_changed(self, clean=False):
+        if clean:
+            self._pill_bom.setText("BOM: applied"); self._pill_bom.setStyleSheet(_PILL_OK)
+        else:
+            self._pill_bom.setText("BOM: modified"); self._pill_bom.setStyleSheet(_PILL_WARN)
+        self._pill_results.setText("LCOH: outdated"); self._pill_results.setStyleSheet(_PILL_WARN)
+        self._pill_lce.setText("LCE: outdated");      self._pill_lce.setStyleSheet(_PILL_WARN)
+
     def _update_synth_tabs(self):
-        """(#4) Enable/disable catalyst synthesis tabs based on BOM material selection."""
-        anode_in_house   = self.bom_tab._combos["Anode Catalyst"].currentText() == "Custom"
-        cathode_in_house = self.bom_tab._combos["Cathode Catalyst"].currentText() == "Custom"
-        self.tabs.setTabEnabled(self._anode_tab_idx,   anode_in_house)
-        self.tabs.setTabEnabled(self._cathode_tab_idx, cathode_in_house)
+        anode_custom   = self.bom_tab._combos["Anode Catalyst"].currentText() == "Custom"
+        cathode_custom = self.bom_tab._combos["Cathode Catalyst"].currentText() == "Custom"
+        self.tabs.setTabEnabled(self._anode_tab_idx,   anode_custom)
+        self.tabs.setTabEnabled(self._cathode_tab_idx, cathode_custom)
+
+    # ── Save / Load ───────────────────────────────────────────────────────
+    def _save_project(self):
+        path,_=QFileDialog.getSaveFileName(self,"Save Project","LCOH_project","LCOH Project (*.lcoh);;JSON (*.json)")
+        if not path: return
+        if not (path.endswith(".lcoh") or path.endswith(".json")): path+=".lcoh"
+        try:
+            with open(path,"w") as f: json.dump(self.state.to_dict(),f,indent=2)
+            QMessageBox.information(self,"Saved",f"Project saved:\n{path}")
+        except Exception as ex:
+            QMessageBox.critical(self,"Save error",str(ex))
+
+    def _load_project(self):
+        path,_=QFileDialog.getOpenFileName(self,"Load Project","","LCOH Project (*.lcoh);;JSON (*.json);;All files (*)")
+        if not path: return
+        try:
+            with open(path,"r") as f: d=json.load(f)
+        except Exception as ex:
+            QMessageBox.critical(self,"Load error",f"Could not read file:\n{ex}"); return
+        warnings=self.state.from_dict(d)
+        # Repopulate all tabs
+        self.inputs_tab.load_state()
+        self.bom_tab.load_state()
+        self._update_synth_tabs()
+        self.results_tab.results=[]
+        # Reset status pills
+        self._pill_inputs.setText("Inputs: applied");    self._pill_inputs.setStyleSheet(_PILL_OK)
+        self._pill_bom.setText("BOM: applied");          self._pill_bom.setStyleSheet(_PILL_OK)
+        self._pill_results.setText("LCOH: outdated");    self._pill_results.setStyleSheet(_PILL_WARN)
+        self._pill_lce.setText("LCE: outdated");         self._pill_lce.setStyleSheet(_PILL_WARN)
+        msg=f"Project loaded from:\n{path}"
+        if warnings: msg+="\n\nWarnings:\n"+"\n".join(f"• {w}" for w in warnings)
+        QMessageBox.information(self,"Loaded",msg)
 
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────────────
