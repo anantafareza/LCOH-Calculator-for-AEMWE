@@ -1423,16 +1423,18 @@ class SensitivityTab(QWidget):
         if hasattr(self,'_cur_hist') and self._cur_hist:
             try: self._cur_hist.remove()
             except Exception: pass
-        bins=25; mn_v=lcohs[max(0,int(nv*0.02))]; mx_v=lcohs[min(nv-1,int(nv*0.98))]
-        # Filter first — prevents out-of-range samples piling into the last bin
-        filtered_h=[v for v in lcohs if mn_v<=v<=mx_v]
-        counts,bin_edges=np.histogram(filtered_h,bins=bins,range=(mn_v,mx_v))
+        x_lo=0.0; x_hi=10.0
+        # Bin only within axis range to avoid giant bars from outliers
+        bins=25
+        clipped=[v for v in lcohs if x_lo<=v<=x_hi]
+        counts,bin_edges=np.histogram(clipped,bins=bins,range=(x_lo,x_hi))
         mids=[(bin_edges[i]+bin_edges[i+1])/2 for i in range(bins)]
         bw=float(bin_edges[1]-bin_edges[0]) if len(bin_edges)>1 else 1.0
         bar_colors=[BLUE_HEX if p10<=m<=p90 else BLUE_HEX+"55" for m in mids]
         bars=self.ax_hist.bar(mids,counts,width=bw*0.92,color=bar_colors,edgecolor="none")
         self.ax_hist.axvline(base_v,color=RED_HEX,linestyle="--",linewidth=1.0,alpha=0.7,label=f"Base {base_v:.3f}")
         self.ax_hist.axvspan(p10,p90,alpha=0.10,color=BLUE_HEX,label="P10–P90")
+        self.ax_hist.set_xlim(x_lo,x_hi)
         self.ax_hist.set_xlabel("LCOH [$/kg H₂]",fontsize=9); self.ax_hist.set_ylabel("Count",fontsize=9)
         self.ax_hist.set_title(f"LCOH Distribution  (n={nv})",fontsize=10)
         self.ax_hist.legend(fontsize=7); self.ax_hist.grid(True,alpha=0.25)
@@ -1459,6 +1461,7 @@ class SensitivityTab(QWidget):
         cy=[i/nv*100 for i in range(0,nv,step)]+[100.0]
         cdf_line,=self.ax_cdf.plot(cx,cy,color=BLUE_HEX,linewidth=2)
         self.ax_cdf.axvline(base_v,color=RED_HEX,linestyle="--",linewidth=1.0,alpha=0.7,label=f"Base {base_v:.3f}")
+        self.ax_cdf.set_xlim(x_lo,x_hi)
         self.ax_cdf.set_xlabel("LCOH [$/kg H₂]",fontsize=9)
         self.ax_cdf.set_ylabel("Cumulative probability [%]",fontsize=9)
         self.ax_cdf.set_title("Cumulative Probability",fontsize=10)
